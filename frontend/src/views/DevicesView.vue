@@ -239,7 +239,7 @@ function openEditDevice(group: DeviceGroup) {
     client_type: device.client_type,
     ikev2_password: '',
     output_subnets: [...(device.client_type === 'WIREGUARD' ? device.wireguard_output_subnets : device.ikev2_output_subnets)],
-    input_routes: (device.client_type === 'WIREGUARD' ? device.wireguard_input_routes : device.ikev2_input_routes).map((route) => ({ ...route })),
+    input_routes: (device.client_type === 'WIREGUARD' ? device.wireguard_input_routes : device.client_type === 'IKEV2' ? device.ikev2_input_routes : (device.vnt_input_routes ?? [])).map((route) => ({ ...route })),
   }
   showIkev2Password.value = false
   showDeviceModal.value = true
@@ -273,6 +273,11 @@ async function submitDevice() {
               wireguard_input_routes: deviceForm.value.input_routes.map((route) => ({ subnet: route.subnet.trim(), target_ip: route.target_ip.trim() })),
             }
           : {}),
+        ...(deviceForm.value.client_type === 'VNT'
+          ? {
+              vnt_input_routes: deviceForm.value.input_routes.map((route) => ({ subnet: route.subnet.trim(), target_ip: route.target_ip.trim() })),
+            }
+          : {}),
       })
     } else {
       await deviceApi.add({
@@ -296,6 +301,11 @@ async function submitDevice() {
           ? {
               wireguard_output_subnets: deviceForm.value.output_subnets.map((subnet) => subnet.trim()).filter(Boolean),
               wireguard_input_routes: deviceForm.value.input_routes.map((route) => ({ subnet: route.subnet.trim(), target_ip: route.target_ip.trim() })),
+            }
+          : {}),
+        ...(deviceForm.value.client_type === 'VNT'
+          ? {
+              vnt_input_routes: deviceForm.value.input_routes.map((route) => ({ subnet: route.subnet.trim(), target_ip: route.target_ip.trim() })),
             }
           : {}),
       })
@@ -662,6 +672,20 @@ async function executeDelete() {
           <div v-for="(_, index) in deviceForm.output_subnets" :key="`output-${index}`" class="flex gap-2">
             <input v-model.trim="deviceForm.output_subnets[index]" type="text" :class="inputClass" placeholder="例如：192.168.10.0/24" required />
             <button type="button" class="rounded-lg border border-slate-200 px-3 text-slate-400 hover:text-red-500 dark:border-slate-600" title="删除出口子网" @click="deviceForm.output_subnets.splice(index, 1)"><Trash2 :size="15" /></button>
+          </div>
+        </div>
+        <div v-if="deviceForm.client_type === 'VNT'" class="space-y-2">
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <label class="block text-sm font-medium text-slate-700 dark:text-slate-300">客户端路由（等同 -i 参数）</label>
+              <p class="mt-0.5 text-xs text-slate-400">保存后立即下发到在线客户端并生效；下一跳须为本网络虚拟 IP。</p>
+            </div>
+            <button type="button" class="flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs text-slate-600 hover:text-cyan-600 dark:border-slate-600 dark:text-slate-300" @click="addInputRoute"><Plus :size="14" />添加</button>
+          </div>
+          <div v-for="(route, index) in deviceForm.input_routes" :key="`vnt-input-${index}`" class="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+            <input v-model.trim="route.subnet" type="text" :class="inputClass" placeholder="目标 CIDR" required />
+            <input v-model.trim="route.target_ip" type="text" :class="inputClass" placeholder="下一跳虚拟 IP" required />
+            <button type="button" class="rounded-lg border border-slate-200 px-3 text-slate-400 hover:text-red-500 dark:border-slate-600" title="删除客户端路由" @click="deviceForm.input_routes.splice(index, 1)"><Trash2 :size="15" /></button>
           </div>
         </div>
         <div v-if="deviceForm.client_type === 'IKEV2' || deviceForm.client_type === 'WIREGUARD'" class="space-y-2">

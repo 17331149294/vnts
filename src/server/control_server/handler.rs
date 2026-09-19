@@ -125,6 +125,11 @@ impl ControlHandler {
             session.ip
         );
 
+        // VNT 客户端确认注册成功：下发托管路由并同步设备记录到其他服务器
+        self.control_service
+            .sync_vnt_device(&session.network_code, &session.device_id)
+            .await;
+
         let response = ConfirmRegResponseMsg { success: true };
         let vec = ResponseMessage::ConfirmReg(response).encode();
         sender.send(Bytes::from(vec)).await?;

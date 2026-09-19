@@ -208,6 +208,45 @@ impl ConfirmRegMsg {
     }
 }
 
+/// 带下一跳的 IPv4 路由（VNT 客户端入口路由，语义等同 vnt -i 参数的 NetInput）
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct Ipv4Route {
+    pub net: Ipv4Net,
+    pub next_hop: Ipv4Addr,
+}
+
+pub(crate) fn ipv4_route_to_proto(route: &Ipv4Route) -> proto::Ipv4Route {
+    let net = route.net.trunc();
+    proto::Ipv4Route {
+        network: net.network().into(),
+        prefix_len: net.prefix_len().into(),
+        next_hop: route.next_hop.into(),
+    }
+}
+
+pub(crate) fn ipv4_route_from_proto(route: proto::Ipv4Route) -> anyhow::Result<Ipv4Route> {
+    let prefix_len = u8::try_from(route.prefix_len)?;
+    Ok(Ipv4Route {
+        net: Ipv4Net::new(Ipv4Addr::from(route.network), prefix_len)?.trunc(),
+        next_hop: Ipv4Addr::from(route.next_hop),
+    })
+}
+
+/// 服务端推送给客户端的静态路由（全量列表，空列表表示清空服务端托管路由）
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PushStaticRoutes {
+    pub routes: Vec<Ipv4Route>,
+}
+
+impl PushStaticRoutes {
+    pub fn encode(self) -> BytesMut {
+        proto::PushStaticRoutes {
+            routes: self.routes.iter().map(ipv4_route_to_proto).collect(),
+        }
+        .encode_bytes_mut()
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ConfirmRegResponseMsg {
     pub success: bool,

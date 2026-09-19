@@ -56,6 +56,18 @@ message SubnetSyncResponse {
     repeated NodeSubnetRoutes nodes = 2;
 }
 
+// 带下一跳的 IPv4 路由（服务端下发给客户端，语义等同 vnt -i 参数）
+message Ipv4Route {
+    fixed32 network = 1;
+    uint32 prefix_len = 2;
+    fixed32 next_hop = 3;
+}
+
+// 服务端推送的静态路由（全量列表，空列表表示清空）
+message PushStaticRoutes {
+    repeated Ipv4Route routes = 1;
+}
+
 message ConfirmRegMsg {
 }
 

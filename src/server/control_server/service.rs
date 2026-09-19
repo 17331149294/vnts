@@ -304,6 +304,26 @@ impl ControlService {
             bail!("私有网络仅允许已添加的设备连接");
         }
 
+        // 多机同步：本地无此设备时向其他服务器查询设备记录，采纳后
+        // 客户端在服务器 1 获取的 IP 在连接服务器 2 时保持不变
+        if existing.is_none()
+            && client_type == ClientType::Vnt
+            && let Some(peer_manager) = self.get_peer_manager()
+            && let Some(record) = peer_manager
+                .query_device_record(&reg_req.network_code, &reg_req.device_id)
+                .await
+        {
+            let record = state.adopt_device_record(record);
+            if let Err(e) = db::save_or_update_device(&record).await {
+                log::warn!("Failed to persist adopted device record: {:?}", e);
+            }
+            log::info!(
+                "Adopted device record from peer server: network_code={}, device_id={}",
+                network_code,
+                reg_req.device_id
+            );
+        }
+
         let (session, entry) = {
             let random_id = rand::rng().next_u64();
             let device_id = reg_req.device_id.clone();
@@ -334,7 +354,6 @@ impl ControlService {
                 entry,
             )
         };
-
         if is_new_network {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -362,6 +381,13 @@ impl ControlService {
             let nc = network_code.clone();
             let record = entry.to_record(&nc);
             db::save_or_update_device(&record).await?;
+        }
+
+        // VNT 客户端注册成功：下发托管路由并同步设备记录到其他服务器
+        if matches!(registration_mode, RegistrationMode::Normal)
+            && client_type == ClientType::Vnt
+        {
+            self.sync_vnt_device(&network_code, &session.device_id).await;
         }
 
         Ok(session)
@@ -838,6 +864,107 @@ impl ControlService {
         Ok((output_subnets, input_routes))
     }
 
+    /// 校验并规范化 VNT 客户端的服务端托管路由（语义等同客户端 -i 参数）：
+    /// next_hop 必须是本网络虚拟网段内的地址（可以是网关或其他客户端），不能是设备自身
+    fn normalize_vnt_routes(
+        config: NetworkConfig,
+        device_ip: Ipv4Addr,
+        mut input_routes: Vec<Ikev2InputRoute>,
+    ) -> anyhow::Result<Vec<Ikev2InputRoute>> {
+        for route in &mut input_routes {
+            route.subnet = route.subnet.trunc();
+            if !config.net.contains(&route.target_ip) {
+                bail!(
+                    "VNT 入口路由的下一跳 {} 不属于虚拟网段 {}",
+                    route.target_ip,
+                    config.net
+                );
+            }
+            if route.target_ip == config.net.network()
+                || route.target_ip == config.net.broadcast()
+            {
+                bail!("VNT 入口路由的下一跳不能是网络地址或广播地址");
+            }
+            if route.target_ip == device_ip {
+                bail!("VNT 入口路由的下一跳不能是设备自身 IP");
+            }
+        }
+        input_routes.sort_by_key(|route| {
+            (
+                std::cmp::Reverse(route.subnet.prefix_len()),
+                u32::from(route.subnet.network()),
+            )
+        });
+        if input_routes
+            .windows(2)
+            .any(|routes| routes[0].subnet == routes[1].subnet)
+        {
+            bail!("同一 VNT 设备不能为相同入口子网配置多个下一跳");
+        }
+        if input_routes.len() > 254 {
+            bail!("VNT 入口路由不能超过 254 条");
+        }
+        Ok(input_routes)
+    }
+
+    /// 构造下发 VNT 客户端静态路由的数据包（gateway 标记 + MsgType::PushStaticRoutes）
+    fn build_push_static_routes_packet(routes: &[Ikev2InputRoute]) -> Option<Bytes> {
+        use crate::protocol::control_message::{Ipv4Route, PushStaticRoutes};
+        use crate::protocol::ip_packet_protocol::{MsgType, NetPacket, HEAD_LENGTH};
+
+        let payload = PushStaticRoutes {
+            routes: routes
+                .iter()
+                .map(|route| Ipv4Route {
+                    net: route.subnet,
+                    next_hop: route.target_ip,
+                })
+                .collect(),
+        }
+        .encode();
+        let mut buf = BytesMut::zeroed(HEAD_LENGTH + payload.len());
+        let mut packet = NetPacket::new(&mut buf).ok()?;
+        packet.set_msg_type(MsgType::PushStaticRoutes);
+        packet.set_gateway_flag(true);
+        packet.set_ttl(1);
+        packet.set_payload(&payload).ok()?;
+        Some(buf.freeze())
+    }
+
+    /// VNT 设备状态同步：
+    /// 1. 设备在线时立即下发托管路由（热生效，客户端无需重启）
+    /// 2. 向其他服务器广播设备记录（IP 绑定 + 路由），保持多机一致
+    pub async fn sync_vnt_device(&self, network_code: &str, device_id: &str) {
+        let Some(state) = self.network_state_provider.get_network_state(network_code) else {
+            return;
+        };
+        let Some(entry) = state.get_device_entry(device_id) else {
+            return;
+        };
+        if entry.client_type != ClientType::Vnt {
+            return;
+        }
+        if entry.is_connected && let Some(ip) = entry.ip {
+            if let Some(sender) = state.sender_map().get(&ip) {
+                if let Some(packet) = Self::build_push_static_routes_packet(&entry.vnt_input_routes)
+                {
+                    _ = sender.try_send(packet);
+                    log::debug!(
+                        "已向在线客户端下发静态路由: network_code={}, device_id={}, routes={}",
+                        network_code,
+                        device_id,
+                        entry.vnt_input_routes.len()
+                    );
+                }
+            }
+        }
+        if let Some(manager) = self.get_peer_manager() {
+            manager
+                .broadcast_device_sync(&entry.to_record(network_code))
+                .await;
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn upsert_device(
         &self,
@@ -851,6 +978,7 @@ impl ControlService {
         ikev2_input_routes: Option<Vec<Ikev2InputRoute>>,
         wireguard_output_subnets: Option<Vec<Ipv4Net>>,
         wireguard_input_routes: Option<Vec<Ikev2InputRoute>>,
+        vnt_input_routes: Option<Vec<Ikev2InputRoute>>,
         mutation: DeviceMutation,
     ) -> anyhow::Result<()> {
         if device_id.is_empty()
@@ -906,6 +1034,7 @@ impl ControlService {
             ikev2_input_routes,
             wireguard_output_subnets,
             wireguard_input_routes,
+            vnt_input_routes,
         ) = match client_type {
             ClientType::Ikev2 => {
                 if wireguard_output_subnets
@@ -938,7 +1067,7 @@ impl ControlService {
                     input_routes,
                     "IKEv2",
                 )?;
-                (outputs, routes, Vec::new(), Vec::new())
+                (outputs, routes, Vec::new(), Vec::new(), Vec::new())
             }
             ClientType::Wireguard => {
                 if ikev2_output_subnets
@@ -971,7 +1100,7 @@ impl ControlService {
                     input_routes,
                     "WireGuard",
                 )?;
-                (Vec::new(), Vec::new(), outputs, routes)
+                (Vec::new(), Vec::new(), outputs, routes, Vec::new())
             }
             ClientType::Vnt => {
                 if ikev2_output_subnets
@@ -989,7 +1118,15 @@ impl ControlService {
                 {
                     bail!("只有 IKEv2 或 WireGuard 设备可以配置入口或出口子网");
                 }
-                (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+                let input_routes = vnt_input_routes
+                    .or_else(|| {
+                        existing
+                            .as_ref()
+                            .map(|entry| entry.vnt_input_routes.clone())
+                    })
+                    .unwrap_or_default();
+                let routes = Self::normalize_vnt_routes(config, ip, input_routes)?;
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new(), routes)
             }
         };
         let password = match client_type {
@@ -1097,6 +1234,7 @@ impl ControlService {
             ikev2_input_routes,
             wireguard_output_subnets,
             wireguard_input_routes,
+            vnt_input_routes,
         )?;
         let record = state
             .get_device_entry(device_id)
@@ -1111,6 +1249,10 @@ impl ControlService {
         }
         if client_type == ClientType::Wireguard {
             self.refresh_wireguard_peers().await;
+        }
+        if client_type == ClientType::Vnt {
+            // VNT 客户端：在线则立即下发托管路由，并同步设备记录到其他服务器
+            self.sync_vnt_device(network_code, device_id).await;
         }
         Ok(())
     }
@@ -1129,6 +1271,7 @@ impl ControlService {
         ikev2_input_routes: Option<Vec<Ikev2InputRoute>>,
         wireguard_output_subnets: Option<Vec<Ipv4Net>>,
         wireguard_input_routes: Option<Vec<Ikev2InputRoute>>,
+        vnt_input_routes: Option<Vec<Ikev2InputRoute>>,
     ) -> anyhow::Result<()> {
         self.upsert_device(
             network_code,
@@ -1141,6 +1284,7 @@ impl ControlService {
             ikev2_input_routes,
             wireguard_output_subnets,
             wireguard_input_routes,
+            vnt_input_routes,
             DeviceMutation::Create(client_type),
         )
         .await
@@ -1166,6 +1310,7 @@ impl ControlService {
             None,
             None,
             None,
+            None,
         )
         .await
     }
@@ -1183,6 +1328,7 @@ impl ControlService {
         ikev2_input_routes: Option<Vec<Ikev2InputRoute>>,
         wireguard_output_subnets: Option<Vec<Ipv4Net>>,
         wireguard_input_routes: Option<Vec<Ikev2InputRoute>>,
+        vnt_input_routes: Option<Vec<Ikev2InputRoute>>,
     ) -> anyhow::Result<()> {
         self.upsert_device(
             network_code,
@@ -1195,6 +1341,7 @@ impl ControlService {
             ikev2_input_routes,
             wireguard_output_subnets,
             wireguard_input_routes,
+            vnt_input_routes,
             DeviceMutation::Update,
         )
         .await
@@ -1213,6 +1360,7 @@ impl ControlService {
             device_id,
             ip,
             ip_type,
+            None,
             None,
             None,
             None,
@@ -1745,6 +1893,7 @@ impl ControlService {
                         ikev2_input_routes: r.ikev2_input_routes,
                         wireguard_output_subnets: r.wireguard_output_subnets,
                         wireguard_input_routes: r.wireguard_input_routes,
+                        vnt_input_routes: r.vnt_input_routes,
                         tx_bytes: r.tx_bytes as u64,
                         rx_bytes: r.rx_bytes as u64,
                         client_type: r.client_type,
@@ -1778,6 +1927,7 @@ impl ControlService {
                     ikev2_input_routes: Vec::new(),
                     wireguard_output_subnets: Vec::new(),
                     wireguard_input_routes: Vec::new(),
+                    vnt_input_routes: Vec::new(),
                     tx_bytes: 0,
                     rx_bytes: 0,
                     client_type,
@@ -1850,6 +2000,7 @@ pub struct DeviceInfoVO {
     pub ikev2_input_routes: Vec<Ikev2InputRoute>,
     pub wireguard_output_subnets: Vec<Ipv4Net>,
     pub wireguard_input_routes: Vec<Ikev2InputRoute>,
+    pub vnt_input_routes: Vec<Ikev2InputRoute>,
     pub tx_bytes: u64,
     pub rx_bytes: u64,
     pub client_type: ClientType,
@@ -2537,6 +2688,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    None,
                 )
                 .await
                 .is_err()
@@ -2554,6 +2706,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -2566,6 +2719,7 @@ mod tests {
                     DeviceIpType::Fixed,
                     ClientType::Ikev2,
                     Some("other-password".to_string()),
+                    None,
                     None,
                     None,
                     None,
@@ -2603,6 +2757,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -2627,6 +2782,7 @@ mod tests {
                 DeviceIpType::Static,
                 None,
                 Some("Alice Laptop".to_string()),
+                None,
                 None,
                 None,
                 None,
@@ -2679,6 +2835,7 @@ mod tests {
                 Some("Branch router".to_string()),
                 Some(outputs),
                 Some(routes),
+                None,
                 None,
                 None,
             )
@@ -2754,6 +2911,7 @@ mod tests {
                     Some(duplicate),
                     None,
                     None,
+                    None,
                 )
                 .await
                 .is_err()
@@ -2769,6 +2927,7 @@ mod tests {
                     None,
                     None,
                     Some(vec!["198.51.100.0/24".parse().unwrap()]),
+                    None,
                     None,
                     None,
                     None,
@@ -2802,6 +2961,7 @@ mod tests {
                 ClientType::Ikev2,
                 Some("password".to_string()),
                 Some("Office Phone".to_string()),
+                None,
                 None,
                 None,
                 None,
@@ -2888,6 +3048,7 @@ mod tests {
                         target_ip: "10.97.0.21".parse().unwrap(),
                     },
                 ]),
+                None,
             )
             .await
             .unwrap();
@@ -2916,6 +3077,7 @@ mod tests {
                     "172.22.0.1/16".parse().unwrap(),
                     "172.22.0.0/16".parse().unwrap(),
                 ]),
+                None,
                 None,
             )
             .await
@@ -2964,6 +3126,7 @@ mod tests {
                 ClientType::Wireguard,
                 None,
                 Some("WireGuard Phone".to_string()),
+                None,
                 None,
                 None,
                 None,

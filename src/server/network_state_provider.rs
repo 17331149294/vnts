@@ -106,6 +106,7 @@ pub struct DeviceEntry {
     pub advertised_subnets: Vec<Ipv4Net>,
     pub ikev2_input_routes: Vec<Ikev2InputRoute>,
     pub wireguard_input_routes: Vec<Ikev2InputRoute>,
+    pub vnt_input_routes: Vec<Ikev2InputRoute>,
     pub subnet_advertisement_active: bool,
 }
 
@@ -170,6 +171,7 @@ impl DeviceEntry {
             },
             ikev2_input_routes: record.ikev2_input_routes,
             wireguard_input_routes: record.wireguard_input_routes,
+            vnt_input_routes: record.vnt_input_routes,
             subnet_advertisement_active: false,
         }
     }
@@ -199,6 +201,11 @@ impl DeviceEntry {
             },
             wireguard_input_routes: if self.client_type == ClientType::Wireguard {
                 self.wireguard_input_routes.clone()
+            } else {
+                Vec::new()
+            },
+            vnt_input_routes: if self.client_type == ClientType::Vnt {
+                self.vnt_input_routes.clone()
             } else {
                 Vec::new()
             },
@@ -448,6 +455,7 @@ impl NetworkState {
         ikev2_input_routes: Vec<Ikev2InputRoute>,
         wireguard_output_subnets: Vec<Ipv4Net>,
         wireguard_input_routes: Vec<Ikev2InputRoute>,
+        vnt_input_routes: Vec<Ikev2InputRoute>,
     ) -> anyhow::Result<Option<DeviceEntry>> {
         let mut guard = self.lease_state.lock();
         guard.validate_ip_available(ip, Some(device_id))?;
@@ -503,6 +511,7 @@ impl NetworkState {
             };
             entry.ikev2_input_routes = ikev2_input_routes;
             entry.wireguard_input_routes = wireguard_input_routes;
+            entry.vnt_input_routes = vnt_input_routes;
             entry.data_version = data_version;
         } else {
             guard.device_map.insert(
@@ -534,6 +543,7 @@ impl NetworkState {
                     },
                     ikev2_input_routes,
                     wireguard_input_routes,
+                    vnt_input_routes,
                     subnet_advertisement_active: false,
                 },
             );
@@ -562,6 +572,52 @@ impl NetworkState {
         }
         guard.data_version += 1;
         guard.full_sync_version = guard.data_version;
+    }
+
+    /// 更新 VNT 客户端的服务端托管路由（等同客户端 -i 参数语义），返回更新后的设备条目
+    pub fn update_vnt_input_routes(
+        &self,
+        device_id: &str,
+        routes: Vec<Ikev2InputRoute>,
+    ) -> anyhow::Result<DeviceEntry> {
+        let mut guard = self.lease_state.lock();
+        let entry = guard
+            .device_map
+            .get_mut(device_id)
+            .ok_or_else(|| anyhow::anyhow!("设备不存在"))?;
+        if entry.client_type != ClientType::Vnt {
+            bail!("只有 VNT 客户端可以配置服务端托管路由");
+        }
+        entry.vnt_input_routes = routes;
+        Ok(entry.clone())
+    }
+
+    /// 采纳来自其他服务器的设备记录（多机同步）：保持 IP 绑定与 VNT 路由一致。
+    /// 返回可能经过本地调整（IP 冲突时丢弃 IP）后的记录，用于本地持久化。
+    pub fn adopt_device_record(&self, record: DeviceRecord) -> DeviceRecord {
+        let mut record = record;
+        let mut guard = self.lease_state.lock();
+        if let Some(entry) = guard.device_map.get_mut(&record.device_id) {
+            // 本地已有该设备：仅同步 VNT 路由；IP 以本地状态为准（本地在线/本地管理员配置优先）
+            entry.vnt_input_routes = record.vnt_input_routes.clone();
+            record.ip = entry.ip.map(|ip| ip.to_string());
+            return record;
+        }
+        // 本地没有该设备：插入离线条目；若 IP 已被本地其他设备占用则丢弃 IP
+        if let Some(ip) = &record.ip
+            && let Ok(ip) = ip.parse::<Ipv4Addr>()
+            && guard.device_ip_map.contains_key(&ip)
+        {
+            record.ip = None;
+        }
+        let ip = record.ip.as_ref().and_then(|s| s.parse().ok());
+        let entry = DeviceEntry::from_record(record.clone());
+        if let Some(ip) = ip {
+            guard.device_ip_map.insert(ip, record.device_id.clone());
+        }
+        let device_id = record.device_id.clone();
+        guard.device_map.insert(device_id, entry);
+        record
     }
 
     pub fn fast_register(
@@ -808,6 +864,11 @@ impl NetworkState {
                 },
                 wireguard_input_routes: if entry.client_type == ClientType::Wireguard {
                     entry.wireguard_input_routes.clone()
+                } else {
+                    Vec::new()
+                },
+                vnt_input_routes: if entry.client_type == ClientType::Vnt {
+                    entry.vnt_input_routes.clone()
                 } else {
                     Vec::new()
                 },
@@ -1232,6 +1293,7 @@ impl NetworkStateInner {
                         advertised_subnets: advertised_subnets.clone(),
                         ikev2_input_routes: Vec::new(),
                         wireguard_input_routes: Vec::new(),
+                        vnt_input_routes: Vec::new(),
                         subnet_advertisement_active,
                     }
                 };
@@ -1290,6 +1352,7 @@ impl NetworkStateInner {
                 advertised_subnets,
                 ikev2_input_routes: Vec::new(),
                 wireguard_input_routes: Vec::new(),
+                vnt_input_routes: Vec::new(),
                 subnet_advertisement_active,
             }
         };

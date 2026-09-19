@@ -14,6 +14,7 @@ use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use sha2::{Digest, Sha256};
 use std::net::{Ipv4Addr, SocketAddr};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::task::JoinHandle;
@@ -138,6 +139,87 @@ impl IpRouteInfo {
     }
 }
 
+fn device_record_to_proto(record: &db::DeviceRecord) -> ServerDeviceRecord {
+    ServerDeviceRecord {
+        network_code: record.network_code.clone(),
+        device_id: record.device_id.clone(),
+        ip: record
+            .ip
+            .as_ref()
+            .and_then(|s| s.parse::<Ipv4Addr>().ok())
+            .map(u32::from),
+        ip_type: record.ip_type as u32,
+        client_type: record.client_type as u32,
+        device_name: record.device_name.clone(),
+        vnt_input_routes: record
+            .vnt_input_routes
+            .iter()
+            .map(|route| ServerIpv4Route {
+                network: u32::from(route.subnet.network()),
+                prefix_len: route.subnet.prefix_len().into(),
+                next_hop: u32::from(route.target_ip),
+            })
+            .collect(),
+    }
+}
+
+fn device_record_from_proto(record: ServerDeviceRecord) -> Result<db::DeviceRecord> {
+    let mut vnt_input_routes = Vec::with_capacity(record.vnt_input_routes.len());
+    for route in record.vnt_input_routes {
+        let prefix_len = u8::try_from(route.prefix_len)?;
+        vnt_input_routes.push(db::Ikev2InputRoute {
+            subnet: ipnet::Ipv4Net::new(Ipv4Addr::from(route.network), prefix_len)?.trunc(),
+            target_ip: Ipv4Addr::from(route.next_hop),
+        });
+    }
+    Ok(db::DeviceRecord {
+        device_id: record.device_id,
+        network_code: record.network_code,
+        ip: record.ip.map(|ip| Ipv4Addr::from(ip).to_string()),
+        ip_type: db::DeviceIpType::from_i32(record.ip_type as i32),
+        client_type: db::ClientType::from_i32(record.client_type as i32),
+        ikev2_password: None,
+        ikev2_output_subnets: Vec::new(),
+        ikev2_input_routes: Vec::new(),
+        wireguard_output_subnets: Vec::new(),
+        wireguard_input_routes: Vec::new(),
+        vnt_input_routes,
+        wireguard_private_key: None,
+        wireguard_public_key: None,
+        device_name: record.device_name,
+        device_version: String::new(),
+        last_connect_time: 0,
+        tx_bytes: 0,
+        rx_bytes: 0,
+    })
+}
+
+/// 构造下发 VNT 客户端静态路由的数据包（gateway 标记 + MsgType::PushStaticRoutes）
+fn build_push_static_routes_packet(
+    routes: &[db::Ikev2InputRoute],
+) -> Option<Bytes> {
+    use crate::protocol::control_message::{Ipv4Route, PushStaticRoutes};
+    use crate::protocol::ip_packet_protocol::{MsgType, NetPacket, HEAD_LENGTH};
+
+    let payload = PushStaticRoutes {
+        routes: routes
+            .iter()
+            .map(|route| Ipv4Route {
+                net: route.subnet,
+                next_hop: route.target_ip,
+            })
+            .collect(),
+    }
+    .encode();
+    let mut buf = bytes::BytesMut::zeroed(HEAD_LENGTH + payload.len());
+    let mut packet = NetPacket::new(&mut buf).ok()?;
+    packet.set_msg_type(MsgType::PushStaticRoutes);
+    packet.set_gateway_flag(true);
+    packet.set_ttl(1);
+    packet.set_payload(&payload).ok()?;
+    Some(buf.freeze())
+}
+
 pub struct PeerServerManager {
     token_hash: String,
     network_state_provider: NetworkStateProvider,
@@ -145,6 +227,9 @@ pub struct PeerServerManager {
     // network_code -> (ip -> 路由列表)，按延迟排序取 top N
     ip_to_routes: Arc<NetworkRouteMap>,
     outbound_tasks: Arc<DashMap<String, OutboundTask>>,
+    // 设备记录查询的等待者（request_id -> oneshot），用于注册时向其他服务器询问设备 IP 绑定
+    device_query_waiters:
+        Arc<parking_lot::Mutex<HashMap<u64, tokio::sync::oneshot::Sender<ServerDeviceRecord>>>>,
 }
 
 impl PeerServerManager {
@@ -159,6 +244,7 @@ impl PeerServerManager {
             peer_servers: Arc::new(parking_lot::RwLock::new(Vec::new())),
             ip_to_routes: Arc::new(DashMap::new()),
             outbound_tasks: Arc::new(DashMap::new()),
+            device_query_waiters: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         }
     }
 
@@ -513,12 +599,154 @@ impl PeerServerManager {
                 self.handle_client_info_response(peer_info, network_codes, res)
                     .await;
             }
+            Some(Payload::DeviceQueryReq(req)) => {
+                self.handle_device_query_request(peer_info, req).await?;
+            }
+            Some(Payload::DeviceQueryRes(res)) => {
+                self.handle_device_query_response(res);
+            }
+            Some(Payload::DeviceSync(sync)) => {
+                self.handle_device_sync(sync).await;
+            }
             _ => {
                 log::warn!("unexpected message from peer: {}", peer_info.get_addr());
             }
         }
 
         Ok(())
+    }
+
+    /// 向所有在线 peer 查询某设备的记录（IP 绑定 + VNT 路由），取第一个命中的响应
+    pub async fn query_device_record(
+        &self,
+        network_code: &str,
+        device_id: &str,
+    ) -> Option<db::DeviceRecord> {
+        use rand::RngCore;
+
+        let peers = self.peer_servers.read().clone();
+        if peers.is_empty() {
+            return None;
+        }
+        let request_id = rand::rng().next_u64();
+        let (tx, rx) = tokio::sync::oneshot::channel::<ServerDeviceRecord>();
+        self.device_query_waiters.lock().insert(request_id, tx);
+
+        let request = ServerMessage {
+            payload: Some(Payload::DeviceQueryReq(ServerDeviceQueryRequest {
+                request_id,
+                network_code: network_code.to_string(),
+                device_id: device_id.to_string(),
+            })),
+        };
+        let data = request.encode_bytes_mut().freeze();
+        for peer in &peers {
+            if let Err(e) = peer.send(data.clone()).await {
+                log::debug!("Failed to send device query to peer: {}", e);
+            }
+        }
+
+        let record = match tokio::time::timeout(Duration::from_secs(2), rx).await {
+            Ok(Ok(record)) => Some(record),
+            _ => None,
+        };
+        self.device_query_waiters.lock().remove(&request_id);
+        record.and_then(|record| device_record_from_proto(record).ok())
+    }
+
+    /// 向所有 peer 广播设备记录变更（注册获得 IP / 管理员编辑 VNT 路由后）
+    pub async fn broadcast_device_sync(&self, record: &db::DeviceRecord) {
+        let peers = self.peer_servers.read().clone();
+        if peers.is_empty() {
+            return;
+        }
+        let message = ServerMessage {
+            payload: Some(Payload::DeviceSync(ServerDeviceSync {
+                device: Some(device_record_to_proto(record)),
+            })),
+        };
+        let data = message.encode_bytes_mut().freeze();
+        for peer in &peers {
+            if let Err(e) = peer.send(data.clone()).await {
+                log::debug!("Failed to broadcast device sync to peer: {}", e);
+            }
+        }
+    }
+
+    /// 收到设备查询：本地持有该设备则返回记录
+    async fn handle_device_query_request(
+        &self,
+        peer_info: &Arc<PeerServerInfo>,
+        req: ServerDeviceQueryRequest,
+    ) -> Result<()> {
+        let device = self
+            .network_state_provider
+            .get_network_state(&req.network_code)
+            .and_then(|state| state.get_device_entry(&req.device_id))
+            .map(|entry| device_record_to_proto(&entry.to_record(&req.network_code)));
+        let response = ServerMessage {
+            payload: Some(Payload::DeviceQueryRes(ServerDeviceQueryResponse {
+                request_id: req.request_id,
+                device,
+            })),
+        };
+        peer_info
+            .send(response.encode_bytes_mut().freeze())
+            .await?;
+        Ok(())
+    }
+
+    /// 收到设备查询响应：唤醒等待者（仅持有记录的响应才唤醒）
+    fn handle_device_query_response(&self, res: ServerDeviceQueryResponse) {
+        let Some(device) = res.device else {
+            return;
+        };
+        if let Some(tx) = self.device_query_waiters.lock().remove(&res.request_id) {
+            _ = tx.send(device);
+        }
+    }
+
+    /// 收到设备记录广播：本地采纳（保持 IP 绑定与 VNT 路由一致），设备本地在线时下发路由
+    async fn handle_device_sync(&self, sync: ServerDeviceSync) {
+        let Some(proto_record) = sync.device else {
+            return;
+        };
+        let Ok(record) = device_record_from_proto(proto_record) else {
+            return;
+        };
+        let network_code = record.network_code.clone();
+        let device_id = record.device_id.clone();
+        let Some(state) = self.network_state_provider.get_network_state(&network_code) else {
+            // 本地尚未有该网络状态：直接持久化，等网络创建后加载
+            if let Err(e) = db::save_or_update_device(&record).await {
+                log::warn!("Failed to persist synced device record: {}", e);
+            }
+            return;
+        };
+        let local = state.get_device_entry(&device_id);
+        if local.as_ref().is_some_and(|entry| entry.is_connected) {
+            // 设备当前连接在本服务器：以本地会话为准，仅同步 VNT 路由并热下发
+            if local.as_ref().is_some_and(|entry| entry.client_type == db::ClientType::Vnt) {
+                if let Ok(entry) = state.update_vnt_input_routes(&device_id, record.vnt_input_routes)
+                    && let Some(ip) = entry.ip
+                    && let Some(sender) = state.sender_map().get(&ip)
+                    && let Some(packet) = build_push_static_routes_packet(&entry.vnt_input_routes)
+                {
+                    _ = sender.try_send(packet);
+                }
+                if let Some(entry) = state.get_device_entry(&device_id) {
+                    let record = entry.to_record(&network_code);
+                    if let Err(e) = db::save_or_update_device(&record).await {
+                        log::warn!("Failed to persist synced device routes: {}", e);
+                    }
+                }
+            }
+            return;
+        }
+        let record = state.adopt_device_record(record);
+        if let Err(e) = db::save_or_update_device(&record).await {
+            log::warn!("Failed to persist synced device record: {}", e);
+        }
     }
 
     async fn handle_forward_data(&self, forward: ServerForwardData) {
@@ -1278,6 +1506,7 @@ impl Clone for PeerServerManager {
             peer_servers: self.peer_servers.clone(),
             ip_to_routes: self.ip_to_routes.clone(),
             outbound_tasks: self.outbound_tasks.clone(),
+            device_query_waiters: self.device_query_waiters.clone(),
         }
     }
 }

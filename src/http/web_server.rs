@@ -1211,6 +1211,8 @@ struct CreateDeviceRequest {
     wireguard_output_subnets: Vec<ipnet::Ipv4Net>,
     #[serde(default)]
     wireguard_input_routes: Vec<Ikev2InputRoute>,
+    #[serde(default)]
+    vnt_input_routes: Vec<Ikev2InputRoute>,
 }
 
 async fn create_device(
@@ -1235,6 +1237,7 @@ async fn create_device(
             Some(body.ikev2_input_routes),
             Some(body.wireguard_output_subnets),
             Some(body.wireguard_input_routes),
+            Some(body.vnt_input_routes),
         )
         .await
     {
@@ -1254,6 +1257,7 @@ struct UpdateDeviceRequest {
     ikev2_input_routes: Option<Vec<Ikev2InputRoute>>,
     wireguard_output_subnets: Option<Vec<ipnet::Ipv4Net>>,
     wireguard_input_routes: Option<Vec<Ikev2InputRoute>>,
+    vnt_input_routes: Option<Vec<Ikev2InputRoute>>,
 }
 
 async fn update_device(
@@ -1278,6 +1282,7 @@ async fn update_device(
             body.ikev2_input_routes,
             body.wireguard_output_subnets,
             body.wireguard_input_routes,
+            body.vnt_input_routes,
         )
         .await
     {
@@ -1702,6 +1707,7 @@ mod tests {
                 }]),
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -1808,6 +1814,7 @@ persistent_keepalive = 25
                     subnet: "172.30.0.9/16".parse().unwrap(),
                     target_ip: "10.61.0.20".parse().unwrap(),
                 }]),
+                None,
             )
             .await
             .unwrap();

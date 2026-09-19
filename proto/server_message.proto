@@ -19,7 +19,45 @@ message ServerMessage {
     ServerForwardData forward_data = 6;
     ServerClientInfoRequest client_info_req = 7;
     ServerClientInfoResponse client_info_res = 8;
+    ServerDeviceQueryRequest device_query_req = 9;
+    ServerDeviceQueryResponse device_query_res = 10;
+    ServerDeviceSync device_sync = 11;
   }
+}
+
+// 带下一跳的 IPv4 路由（VNT 客户端入口路由，等同 -i 参数）
+message ServerIpv4Route {
+  fixed32 network = 1;
+  uint32 prefix_len = 2;
+  fixed32 next_hop = 3;
+}
+
+// 设备记录（服务器间同步：IP 绑定 + VNT 客户端路由）
+message ServerDeviceRecord {
+  string network_code = 1;
+  string device_id = 2;
+  optional fixed32 ip = 3;   // 已分配的虚拟 IP（可能未知）
+  uint32 ip_type = 4;        // 0=Dynamic 1=Static 2=Fixed
+  uint32 client_type = 5;    // ClientType
+  string device_name = 6;
+  repeated ServerIpv4Route vnt_input_routes = 7;
+}
+
+// 查询某台服务器是否持有指定设备记录
+message ServerDeviceQueryRequest {
+  uint64 request_id = 1;
+  string network_code = 2;
+  string device_id = 3;
+}
+
+message ServerDeviceQueryResponse {
+  uint64 request_id = 1;
+  optional ServerDeviceRecord device = 2; // 持有则返回，否则为空
+}
+
+// 广播设备记录变更（注册获得 IP / 管理员编辑路由后）
+message ServerDeviceSync {
+  ServerDeviceRecord device = 1;
 }
 
 // 转发数据到其他服务器
