@@ -155,6 +155,7 @@ export interface WireGuardServiceInfo {
   bind: string
   endpoint: string
   persistent_keepalive: number
+  dns: string[]
   public_key: string | null
   runtime_error: string | null
 }
@@ -164,6 +165,7 @@ export interface UpdateWireGuardServicePayload {
   bind: string
   endpoint: string
   persistent_keepalive: number
+  dns: string[]
 }
 
 export interface DeviceWireGuardAccessInfo {

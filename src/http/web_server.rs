@@ -223,6 +223,7 @@ struct WireGuardServiceInfo {
     bind: String,
     endpoint: String,
     persistent_keepalive: u16,
+    dns: Vec<String>,
     public_key: Option<String>,
     runtime_error: Option<String>,
 }
@@ -233,6 +234,8 @@ struct UpdateWireGuardServiceRequest {
     bind: String,
     endpoint: String,
     persistent_keepalive: u16,
+    #[serde(default)]
+    dns: Vec<String>,
 }
 
 fn wireguard_service_info(
@@ -248,6 +251,7 @@ fn wireguard_service_info(
         bind: config.bind.to_string(),
         endpoint: config.endpoint.clone(),
         persistent_keepalive: config.persistent_keepalive,
+        dns: config.dns.iter().map(ToString::to_string).collect(),
         public_key: config
             .private_key
             .as_ref()
@@ -298,6 +302,13 @@ async fn update_wireguard_settings(
         Ok(value) => value,
         Err(_) => return ApiResponse::<()>::err("WireGuard 监听地址无效").into_response(),
     };
+    let dns = body
+        .dns
+        .iter()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().parse::<Ipv4Addr>())
+        .collect::<Result<Vec<_>, _>>>()
+        .map_err(|_| anyhow::anyhow!("WireGuard DNS 必须是有效的 IPv4 地址"))?;
     let mut candidate = WireGuardConfig {
         enabled: body.enabled,
         bind,
@@ -306,6 +317,7 @@ async fn update_wireguard_settings(
             .as_ref()
             .and_then(|value| value.private_key.clone()),
         persistent_keepalive: body.persistent_keepalive,
+        dns,
     };
     if candidate.private_key.as_deref().is_none_or(str::is_empty) {
         candidate.private_key = Some(crate::server::wireguard::generate_private_key());
@@ -417,8 +429,19 @@ async fn get_device_wireguard_access(
             allowed_ips.push(subnet);
         }
     }
+    let dns_servers = service_config
+        .dns
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let dns_line = if dns_servers.is_empty() {
+        String::new()
+    } else {
+        format!("DNS = {dns_servers}\n")
+    };
     let config_text = format!(
-        "[Interface]\nPrivateKey = {private_key}\nAddress = {ip}/{}\n\n[Peer]\nPublicKey = {server_public_key}\nAllowedIPs = {}\nEndpoint = {}\nPersistentKeepalive = {}\n",
+        "[Interface]\nPrivateKey = {private_key}\nAddress = {ip}/{}\n{dns_line}\n[Peer]\nPublicKey = {server_public_key}\nAllowedIPs = {}\nEndpoint = {}\nPersistentKeepalive = {}\n",
         network.netmask,
         allowed_ips.join(", "),
         service_config.endpoint,

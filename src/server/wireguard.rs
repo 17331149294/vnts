@@ -781,6 +781,7 @@ mod tests {
             endpoint: "127.0.0.1:51820".to_string(),
             private_key: Some(server_private.clone()),
             persistent_keepalive: 25,
+            dns: Vec::new(),
         };
         let handle = start(config, control.clone()).await.unwrap();
         control.set_wireguard_manager(handle.clone());

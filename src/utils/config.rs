@@ -42,6 +42,8 @@ pub struct WireGuardConfig {
     pub private_key: Option<String>,
     #[serde(default = "default_wireguard_keepalive")]
     pub persistent_keepalive: u16,
+    #[serde(default)]
+    pub dns: Vec<Ipv4Addr>,
 }
 
 const fn default_wireguard_keepalive() -> u16 {
@@ -56,6 +58,7 @@ impl Default for WireGuardConfig {
             endpoint: String::new(),
             private_key: None,
             persistent_keepalive: default_wireguard_keepalive(),
+            dns: Vec::new(),
         }
     }
 }
@@ -335,6 +338,11 @@ pub fn update_wireguard_config(
         "persistent_keepalive",
         Value::from(i64::from(config.persistent_keepalive)),
     );
+    let mut dns = Array::new();
+    for address in &config.dns {
+        dns.push(address.to_string());
+    }
+    insert_value(table, "dns", Value::Array(dns));
     let rendered = document.to_string();
     let parsed: ConfigFile = toml::from_str(&rendered)?;
     let wireguard = parsed
@@ -494,6 +502,7 @@ key = "key.pem"
 # endpoint = "vpn.example.com:51820"
 # private_key = "" # 留空时首次启用自动生成
 # persistent_keepalive = 25
+# dns = [] # 推送给 WireGuard 客户端的 DNS 服务器（写入客户端配置的 DNS 字段）
 #
 # 自定义虚拟网段 格式：网络编号 = "网段"
 [custom_nets]
