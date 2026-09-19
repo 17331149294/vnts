@@ -307,8 +307,13 @@ async fn update_wireguard_settings(
         .iter()
         .filter(|value| !value.trim().is_empty())
         .map(|value| value.trim().parse::<Ipv4Addr>())
-        .collect::<Result<Vec<_>, _>>>()
-        .map_err(|_| anyhow::anyhow!("WireGuard DNS 必须是有效的 IPv4 地址"))?;
+        .collect::<Result<Vec<_>, _>>();
+    let dns = match dns {
+        Ok(value) => value,
+        Err(_) => {
+            return ApiResponse::<()>::err("WireGuard DNS 必须是有效的 IPv4 地址").into_response();
+        }
+    };
     let mut candidate = WireGuardConfig {
         enabled: body.enabled,
         bind,
