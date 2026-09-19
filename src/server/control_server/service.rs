@@ -253,7 +253,7 @@ impl ControlService {
 
     async fn register_inner(
         &self,
-        reg_req: RegRequestMsg,
+        mut reg_req: RegRequestMsg,
         sender: Sender<Bytes>,
         client_type: ClientType,
     ) -> anyhow::Result<Session> {
@@ -302,6 +302,14 @@ impl ControlService {
             && !state.has_device(&reg_req.device_id)
         {
             bail!("私有网络仅允许已添加的设备连接");
+        }
+
+        // VNT 客户端：服务端配置了出口网段则覆盖客户端上报的 -o，集中管理
+        if client_type == ClientType::Vnt
+            && let Some(ref existing_entry) = existing
+            && !existing_entry.vnt_output_subnets.is_empty()
+        {
+            reg_req.advertised_subnets = existing_entry.vnt_output_subnets.clone();
         }
 
         let (session, entry) = {
@@ -851,6 +859,7 @@ impl ControlService {
         ikev2_input_routes: Option<Vec<Ikev2InputRoute>>,
         wireguard_output_subnets: Option<Vec<Ipv4Net>>,
         wireguard_input_routes: Option<Vec<Ikev2InputRoute>>,
+        vnt_output_subnets: Option<Vec<Ipv4Net>>,
         mutation: DeviceMutation,
     ) -> anyhow::Result<()> {
         if device_id.is_empty()
@@ -992,6 +1001,21 @@ impl ControlService {
                 (Vec::new(), Vec::new(), Vec::new(), Vec::new())
             }
         };
+        // VNT 客户端出口网段：服务端集中配置，在线时推送热更新
+        let vnt_output_subnets = if client_type == ClientType::Vnt {
+            let mut subs = vnt_output_subnets
+                .or_else(|| {
+                    existing
+                        .as_ref()
+                        .map(|entry| entry.vnt_output_subnets.clone())
+                })
+                .unwrap_or_default();
+            subs.sort_by_key(|net| (u32::from(net.network()), net.prefix_len()));
+            subs.dedup();
+            subs
+        } else {
+            Vec::new()
+        };
         let password = match client_type {
             ClientType::Vnt => {
                 if ikev2_password.is_some() {
@@ -1097,6 +1121,7 @@ impl ControlService {
             ikev2_input_routes,
             wireguard_output_subnets,
             wireguard_input_routes,
+            vnt_output_subnets.clone(),
         )?;
         let record = state
             .get_device_entry(device_id)
@@ -1111,6 +1136,27 @@ impl ControlService {
         }
         if client_type == ClientType::Wireguard {
             self.refresh_wireguard_peers().await;
+        }
+        // VNT 客户端在线时推送新的出口网段，热更新其 -o
+        if client_type == ClientType::Vnt
+            && let Some(ip) = state.get_device_entry(device_id).and_then(|e| e.ip)
+            && let Some(sender) = state.sender_map().get(&ip)
+        {
+            use crate::protocol::control_message::PushOutputSubnets;
+            use crate::protocol::ip_packet_protocol::{HEAD_LENGTH, MsgType, NetPacket};
+            let payload = PushOutputSubnets {
+                subnets: vnt_output_subnets.clone(),
+            }
+            .encode();
+            let mut bytes = BytesMut::zeroed(HEAD_LENGTH + payload.len());
+            if let Ok(mut packet) = NetPacket::new(&mut bytes) {
+                packet.set_msg_type(MsgType::PushOutputSubnets);
+                packet.set_gateway_flag(true);
+                packet.set_ttl(1);
+                if packet.set_payload(&payload).is_ok() {
+                    let _ = sender.try_send(bytes.freeze());
+                }
+            }
         }
         Ok(())
     }
@@ -1141,6 +1187,7 @@ impl ControlService {
             ikev2_input_routes,
             wireguard_output_subnets,
             wireguard_input_routes,
+            None,
             DeviceMutation::Create(client_type),
         )
         .await
@@ -1183,6 +1230,7 @@ impl ControlService {
         ikev2_input_routes: Option<Vec<Ikev2InputRoute>>,
         wireguard_output_subnets: Option<Vec<Ipv4Net>>,
         wireguard_input_routes: Option<Vec<Ikev2InputRoute>>,
+        vnt_output_subnets: Option<Vec<Ipv4Net>>,
     ) -> anyhow::Result<()> {
         self.upsert_device(
             network_code,
@@ -1195,6 +1243,7 @@ impl ControlService {
             ikev2_input_routes,
             wireguard_output_subnets,
             wireguard_input_routes,
+            vnt_output_subnets,
             DeviceMutation::Update,
         )
         .await
@@ -1745,6 +1794,7 @@ impl ControlService {
                         ikev2_input_routes: r.ikev2_input_routes,
                         wireguard_output_subnets: r.wireguard_output_subnets,
                         wireguard_input_routes: r.wireguard_input_routes,
+                        vnt_output_subnets: r.vnt_output_subnets,
                         tx_bytes: r.tx_bytes as u64,
                         rx_bytes: r.rx_bytes as u64,
                         client_type: r.client_type,
@@ -1778,6 +1828,7 @@ impl ControlService {
                     ikev2_input_routes: Vec::new(),
                     wireguard_output_subnets: Vec::new(),
                     wireguard_input_routes: Vec::new(),
+                    vnt_output_subnets: Vec::new(),
                     tx_bytes: 0,
                     rx_bytes: 0,
                     client_type,
@@ -1850,6 +1901,7 @@ pub struct DeviceInfoVO {
     pub ikev2_input_routes: Vec<Ikev2InputRoute>,
     pub wireguard_output_subnets: Vec<Ipv4Net>,
     pub wireguard_input_routes: Vec<Ikev2InputRoute>,
+    pub vnt_output_subnets: Vec<Ipv4Net>,
     pub tx_bytes: u64,
     pub rx_bytes: u64,
     pub client_type: ClientType,

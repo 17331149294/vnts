@@ -238,7 +238,9 @@ function openEditDevice(group: DeviceGroup) {
     ip_type: device.client_type === 'WIREGUARD' ? 'Static' : (device.ip_type ?? 'Dynamic'),
     client_type: device.client_type,
     ikev2_password: '',
-    output_subnets: [...(device.client_type === 'WIREGUARD' ? device.wireguard_output_subnets : device.ikev2_output_subnets)],
+    output_subnets: device.client_type === 'VNT'
+      ? [...(device.vnt_output_subnets ?? [])]
+      : [...(device.client_type === 'WIREGUARD' ? device.wireguard_output_subnets : device.ikev2_output_subnets)],
     input_routes: (device.client_type === 'WIREGUARD' ? device.wireguard_input_routes : device.ikev2_input_routes).map((route) => ({ ...route })),
   }
   showIkev2Password.value = false
@@ -271,6 +273,11 @@ async function submitDevice() {
           ? {
               wireguard_output_subnets: deviceForm.value.output_subnets.map((subnet) => subnet.trim()).filter(Boolean),
               wireguard_input_routes: deviceForm.value.input_routes.map((route) => ({ subnet: route.subnet.trim(), target_ip: route.target_ip.trim() })),
+            }
+          : {}),
+        ...(deviceForm.value.client_type === 'VNT'
+          ? {
+              vnt_output_subnets: deviceForm.value.output_subnets.map((subnet) => subnet.trim()).filter(Boolean),
             }
           : {}),
       })

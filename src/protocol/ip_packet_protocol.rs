@@ -113,6 +113,7 @@ pub enum MsgType {
     SubnetSyncRes = 24,
     Ikev2Relay = 25,
     WireGuardRelay = 26,
+    PushOutputSubnets = 28,
 }
 
 impl From<MsgType> for u8 {
@@ -155,6 +156,7 @@ impl TryFrom<u8> for MsgType {
             24 => MsgType::SubnetSyncRes,
             25 => MsgType::Ikev2Relay,
             26 => MsgType::WireGuardRelay,
+            28 => MsgType::PushOutputSubnets,
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,

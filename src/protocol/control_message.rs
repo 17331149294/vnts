@@ -198,6 +198,24 @@ impl SubnetSyncResponse {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PushOutputSubnets {
+    pub subnets: Vec<Ipv4Net>,
+}
+
+impl PushOutputSubnets {
+    pub fn encode(self) -> BytesMut {
+        proto::PushOutputSubnets {
+            subnets: self
+                .subnets
+                .into_iter()
+                .map(ipv4_subnet_to_proto)
+                .collect(),
+        }
+        .encode_bytes_mut()
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ConfirmRegMsg {}
 impl ConfirmRegMsg {
     pub fn from(_msg: proto::ConfirmRegMsg) -> anyhow::Result<Self> {

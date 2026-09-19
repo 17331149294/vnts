@@ -1254,6 +1254,7 @@ struct UpdateDeviceRequest {
     ikev2_input_routes: Option<Vec<Ikev2InputRoute>>,
     wireguard_output_subnets: Option<Vec<ipnet::Ipv4Net>>,
     wireguard_input_routes: Option<Vec<Ikev2InputRoute>>,
+    vnt_output_subnets: Option<Vec<ipnet::Ipv4Net>>,
 }
 
 async fn update_device(
@@ -1278,6 +1279,7 @@ async fn update_device(
             body.ikev2_input_routes,
             body.wireguard_output_subnets,
             body.wireguard_input_routes,
+            body.vnt_output_subnets,
         )
         .await
     {

@@ -56,6 +56,11 @@ message SubnetSyncResponse {
     repeated NodeSubnetRoutes nodes = 2;
 }
 
+// 服务端推送的出口网段（语义等同客户端 -o 参数，在线热更新无需重启）
+message PushOutputSubnets {
+    repeated Ipv4Subnet subnets = 1;
+}
+
 message ConfirmRegMsg {
 }
 
