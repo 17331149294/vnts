@@ -615,7 +615,7 @@ pub fn apply_vnt_default_route_and_dns(config_toml: &str) -> anyhow::Result<Stri
         table.insert(
             "dns".to_string(),
             toml::Value::Array(vec![toml::Value::String(
-                "10.10.110.223".to_string(),
+                "10.10.110.233".to_string(),
             )]),
         );
     } else {
@@ -632,9 +632,10 @@ pub fn apply_vnt_default_route_and_dns(config_toml: &str) -> anyhow::Result<Stri
     if !table.contains_key("input") {
         table.insert(
             "input".to_string(),
-            toml::Value::Array(vec![toml::Value::String(
-                "199.254.0.0/16,10.26.0.254".to_string(),
-            )]),
+            toml::Value::Array(vec![
+                toml::Value::String("199.254.0.0/16,10.26.0.254".to_string()),
+                toml::Value::String("10.10.110.233/32,10.26.0.254".to_string()),
+            ]),
         );
     }
     Ok(toml::to_string_pretty(&table)?)
@@ -720,7 +721,7 @@ pub fn canonicalize_stored_client_config(
     )?;
     // 交付边界统一注入默认 DNS 与默认入栈路由：无论设备是新建设备还是
     // 存量设备、订阅还是直连，只要配置里未显式写 dns/input 就默认带上
-    // dns=10.10.110.223 与 input=["199.254.0.0/16,10.26.0.254"]。
+    // dns=["10.10.110.233"] 与 input=["199.254.0.0/16,10.26.0.254","10.10.110.233/32,10.26.0.254"]。
     Ok(apply_vnt_default_route_and_dns(&canonical)?)
 }
 

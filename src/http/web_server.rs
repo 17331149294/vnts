@@ -2625,9 +2625,9 @@ mod tests {
     }
 
     #[test]
-    fn unconfigured_client_access_has_no_subscription_server() {
+    fn unconfigured_client_access_has_default_subscription_server() {
         let access = ClientAccessConfig::default();
-        assert!(access.effective_subscription_server().is_empty());
+        assert_eq!(access.effective_subscription_server(), "tcp://www.dongjianwei.cn:29872");
     }
 
     #[test]

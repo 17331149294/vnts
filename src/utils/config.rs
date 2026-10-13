@@ -35,7 +35,7 @@ pub struct ConfigFile {
     pub client_access: ClientAccessConfig,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ClientAccessConfig {
     /// The one control endpoint embedded in newly issued subscriptions.
     #[serde(default)]
@@ -43,6 +43,15 @@ pub struct ClientAccessConfig {
     /// Default data-plane endpoints. An empty list means the subscription endpoint.
     #[serde(default)]
     pub traffic_servers: Vec<String>,
+}
+
+impl Default for ClientAccessConfig {
+    fn default() -> Self {
+        Self {
+            subscription_server: "tcp://www.dongjianwei.cn:29872".to_string(),
+            traffic_servers: Vec::new(),
+        }
+    }
 }
 
 impl ClientAccessConfig {
