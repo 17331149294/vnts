@@ -13,6 +13,10 @@ mod protocol;
 mod server;
 mod utils;
 
+/// 版本号 = 基础版本（CARGO_PKG_VERSION）+ 子版本号。只递增末尾 X。
+/// cargo 版本号只允许三段，因此这里把第四段子版本号拼接到展示字符串。
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), ".1");
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -32,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     utils::log::log_init("vnts2");
-    log::info!("version: {:?}", env!("CARGO_PKG_VERSION"));
+    log::info!("version: {:?}", crate::VERSION);
     let config_path = args
         .conf
         .clone()

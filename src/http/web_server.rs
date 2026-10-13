@@ -244,6 +244,7 @@ struct WireGuardServiceInfo {
     bind: String,
     endpoint: String,
     persistent_keepalive: u16,
+    dns: Vec<String>,
     public_key: Option<String>,
     runtime_error: Option<String>,
 }
@@ -254,6 +255,8 @@ struct UpdateWireGuardServiceRequest {
     bind: String,
     endpoint: String,
     persistent_keepalive: u16,
+    #[serde(default)]
+    dns: Vec<String>,
 }
 
 fn wireguard_service_info(
@@ -269,6 +272,7 @@ fn wireguard_service_info(
         bind: config.bind.to_string(),
         endpoint: config.endpoint.clone(),
         persistent_keepalive: config.persistent_keepalive,
+        dns: config.dns.clone(),
         public_key: config
             .private_key
             .as_ref()
@@ -327,6 +331,7 @@ async fn update_wireguard_settings(
             .as_ref()
             .and_then(|value| value.private_key.clone()),
         persistent_keepalive: body.persistent_keepalive,
+        dns: body.dns,
     };
     if candidate.private_key.as_deref().is_none_or(str::is_empty) {
         candidate.private_key = Some(crate::server::wireguard::generate_private_key());
@@ -380,6 +385,7 @@ struct WireGuardAccessInfo {
     device_id: String,
     private_key: String,
     public_key: String,
+    dns: Vec<String>,
     config: String,
 }
 
@@ -438,13 +444,19 @@ async fn get_device_wireguard_access(
             allowed_ips.push(subnet);
         }
     }
-    let config_text = format!(
-        "[Interface]\nPrivateKey = {private_key}\nAddress = {ip}/{}\n\n[Peer]\nPublicKey = {server_public_key}\nAllowedIPs = {}\nEndpoint = {}\nPersistentKeepalive = {}\n",
+    let mut config_text = format!(
+        "[Interface]\nPrivateKey = {private_key}\nAddress = {ip}/{}\n",
         network.netmask,
+    );
+    if !service_config.dns.is_empty() {
+        config_text.push_str(&format!("DNS = {}\n", service_config.dns.join(", ")));
+    }
+    config_text.push_str(&format!(
+        "\n[Peer]\nPublicKey = {server_public_key}\nAllowedIPs = {}\nEndpoint = {}\nPersistentKeepalive = {}\n",
         allowed_ips.join(", "),
         service_config.endpoint,
         service_config.persistent_keepalive,
-    );
+    ));
     no_store(
         ApiResponse::ok(WireGuardAccessInfo {
             service: wireguard_service_info(
@@ -458,6 +470,7 @@ async fn get_device_wireguard_access(
             device_id,
             private_key,
             public_key,
+            dns: service_config.dns.clone(),
             config: config_text,
         })
         .into_response(),

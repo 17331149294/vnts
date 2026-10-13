@@ -22,12 +22,13 @@ const advancedOpen = ref(false)
 const endpointInput = ref<HTMLInputElement | null>(null)
 const keepaliveInput = ref<HTMLInputElement | null>(null)
 const errorAlert = ref<HTMLElement | null>(null)
-const form = reactive({ enabled: false, bind: '[::]:51820', endpoint: '', persistentKeepalive: 25 })
+const form = reactive({ enabled: false, bind: '[::]:51820', endpoint: '', persistentKeepalive: 25, dns: [] as string[] })
+const dnsText = ref('')
 const inputClass = 'w-full rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm text-slate-800 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:focus:border-blue-500 dark:focus:ring-blue-500/20'
 const secondaryButtonClass = 'inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-40 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700'
 
 function serializeForm() { return JSON.stringify(form) }
-function serializeAdvanced() { return JSON.stringify({ bind: form.bind, persistentKeepalive: form.persistentKeepalive }) }
+function serializeAdvanced() { return JSON.stringify({ bind: form.bind, persistentKeepalive: form.persistentKeepalive, dns: form.dns }) }
 const hasChanges = computed(() => Boolean(savedSnapshot.value) && serializeForm() !== savedSnapshot.value)
 const advancedDirty = computed(() => Boolean(savedAdvancedSnapshot.value) && serializeAdvanced() !== savedAdvancedSnapshot.value)
 const advancedError = computed(() => Boolean(info.value?.runtime_error || saveError.value))
@@ -47,6 +48,8 @@ function applyInfo(value: WireGuardServiceInfo) {
   form.bind = value.bind
   form.endpoint = value.endpoint
   form.persistentKeepalive = value.persistent_keepalive
+  form.dns = value.dns ?? []
+  dnsText.value = form.dns.join(', ')
   savedSnapshot.value = serializeForm()
   savedAdvancedSnapshot.value = serializeAdvanced()
   saveError.value = value.runtime_error ?? ''
@@ -74,12 +77,14 @@ async function save() {
     return
   }
   saving.value = true; saveError.value = ''
+  form.dns = dnsText.value.split(',').map((item) => item.trim()).filter(Boolean)
   try {
     applyInfo(await settingsApi.updateWireGuard({
       enabled: form.enabled,
       bind: form.bind.trim(),
       endpoint: form.endpoint.trim(),
       persistent_keepalive: form.persistentKeepalive,
+      dns: form.dns,
     }))
     toast.success(form.enabled ? 'WireGuard 配置已保存并生效' : 'WireGuard 服务已停用，配置已保留')
   } catch (error) {
@@ -136,6 +141,7 @@ onMounted(load)
         <div class="grid gap-5 sm:grid-cols-2">
           <label><span class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">监听地址</span><input v-model.trim="form.bind" :class="inputClass" placeholder="[::]:51820" /><span class="mt-1.5 block text-sm text-slate-500 dark:text-slate-400">服务端接收 WireGuard 数据的本地地址。</span></label>
           <label><span class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">PersistentKeepalive</span><input ref="keepaliveInput" v-model.number="form.persistentKeepalive" type="number" min="0" max="65535" :class="inputClass" /><span class="mt-1.5 block text-sm text-slate-500 dark:text-slate-400">默认 25 秒；设为 0 表示关闭。</span></label>
+          <label class="sm:col-span-2"><span class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">DNS 服务器</span><input v-model.trim="dnsText" :class="inputClass" placeholder="10.26.0.1, 8.8.8.8" /><span class="mt-1.5 block text-sm text-slate-500 dark:text-slate-400">逗号分隔。写入 WG 客户端配置的 <code>[Interface] DNS</code> 行，客户端（--allow-dns）会写入本机系统解析。</span></label>
         </div>
         <div v-if="info.public_key" class="mt-5 rounded-lg bg-slate-50 p-4 dark:bg-slate-900/60"><div class="mb-1 text-sm font-medium text-slate-500">服务端公钥</div><div class="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center"><code class="min-w-0 flex-1 break-all text-sm text-slate-700 dark:text-slate-300">{{ info.public_key }}</code><button type="button" :class="secondaryButtonClass" @click="copyPublicKey"><Clipboard :size="14" />复制</button></div></div>
       </SettingsDisclosure>

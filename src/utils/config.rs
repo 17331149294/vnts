@@ -154,6 +154,10 @@ pub struct WireGuardConfig {
     pub private_key: Option<String>,
     #[serde(default = "default_wireguard_keepalive")]
     pub persistent_keepalive: u16,
+    /// 下发给 WireGuard 客户端的 DNS 服务器列表。会写入生成的客户端配置
+    /// 的 `[Interface] DNS` 行，供手机扫码导入。
+    #[serde(default)]
+    pub dns: Vec<String>,
 }
 
 const fn default_wireguard_keepalive() -> u16 {
@@ -168,6 +172,7 @@ impl Default for WireGuardConfig {
             endpoint: String::new(),
             private_key: None,
             persistent_keepalive: default_wireguard_keepalive(),
+            dns: Vec::new(),
         }
     }
 }
@@ -482,6 +487,11 @@ pub fn update_wireguard_config(
         table,
         "persistent_keepalive",
         Value::from(i64::from(config.persistent_keepalive)),
+    );
+    insert_value(
+        table,
+        "dns",
+        Value::Array(config.dns.iter().cloned().map(Value::from).collect()),
     );
     let rendered = document.to_string();
     let parsed: ConfigFile = toml::from_str(&rendered)?;

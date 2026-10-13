@@ -26,6 +26,8 @@ pub struct ControlHandler {
     sender: WeakSender<Bytes>,
     session: Option<Session>,
     subscription_session: Option<SubscriptionControlSession>,
+    /// 无订阅凭据直连客户端的身份，断开时用于清理 direct_sessions。
+    direct_session: Option<(String, String)>,
 }
 
 impl ControlHandler {
@@ -40,6 +42,7 @@ impl ControlHandler {
             sender,
             session: None,
             subscription_session: None,
+            direct_session: None,
         }
     }
 
@@ -123,7 +126,7 @@ impl ControlHandler {
             ip: session.ip,
             prefix_len: session.network_state.net_prefix_len(),
             gateway: session.network_state.gateway(),
-            server_version: env!("CARGO_PKG_VERSION").to_string(),
+            server_version: crate::VERSION.to_string(),
             subnet_sync_supported: true,
             subscription_config_supported: false,
             subscription: None,
@@ -139,6 +142,15 @@ impl ControlHandler {
                 .await
         {
             log::warn!("设备 {network_code}/{device_id} 注册后的受管配置补发失败: {error:#}");
+        } else if session.subscription_identity.is_none() {
+            // 无订阅凭据的直连客户端：登记到 direct_sessions，供 Web 修改
+            // 高级配置（input/output）后向其热推送配置。
+            self.control_service.upsert_direct_session(
+                &session.network_code,
+                &session.device_id,
+                session.ip,
+                sender.clone(),
+            );
         }
         Ok(())
     }
@@ -747,6 +759,15 @@ impl ControlHandler {
         reply_net_packet.set_seq(packet.seq());
         reply_net_packet.set_payload(&reply_ip_buf).ok()?;
         Some(reply_buf.freeze())
+    }
+}
+
+impl Drop for ControlHandler {
+    fn drop(&mut self) {
+        if let Some((network_code, device_id)) = self.direct_session.take() {
+            self.control_service
+                .remove_direct_session(&network_code, &device_id);
+        }
     }
 }
 

@@ -238,6 +238,18 @@ struct SubscriptionSessionTarget {
     control_connection: bool,
 }
 
+/// 无订阅凭据的直连连接（客户端通过 `-s` 直连服务端，未走订阅服务器）。
+/// 与受管设备身份 `(network_code, device_id)` 一一对应，用于 Web 端修改设备
+/// 高级配置（input/output）后，向在线的直连客户端热推送配置。
+struct DirectSessionEntry {
+    network_code: String,
+    device_id: String,
+    ip: Ipv4Addr,
+    sender: Sender<Bytes>,
+    control_connection: bool,
+    applied_revision: u64,
+}
+
 impl SubscriptionSessionEntry {
     fn target(&self, require_complete: bool) -> Option<SubscriptionSessionTarget> {
         self.targets(require_complete).into_iter().next()
@@ -271,6 +283,7 @@ pub struct ControlService {
     network_init_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     device_mutation_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     subscription_sessions: Arc<DashMap<(String, String), SubscriptionSessionEntry>>,
+    direct_sessions: Arc<DashMap<(String, String), DirectSessionEntry>>,
     ikev2_device_mutation_lock: Arc<tokio::sync::Mutex<()>>,
     wireguard_device_mutation_lock: Arc<tokio::sync::Mutex<()>>,
     peer_manager: Arc<RwLock<Option<Arc<crate::server::peer_server::PeerServerManager>>>>,
@@ -310,6 +323,7 @@ impl ControlService {
             network_init_locks: Arc::new(DashMap::new()),
             device_mutation_locks: Arc::new(DashMap::new()),
             subscription_sessions: Arc::new(DashMap::new()),
+            direct_sessions: Arc::new(DashMap::new()),
             ikev2_device_mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
             wireguard_device_mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
             peer_manager: Arc::new(RwLock::new(None)),
@@ -1028,17 +1042,82 @@ impl ControlService {
         record: &db::ManagedConfigRecord,
     ) -> anyhow::Result<SubscriptionPushStatus> {
         let identity = (record.network_code.clone(), record.device_id.clone());
-        let sessions = {
-            let Some(entry) = self.subscription_sessions.get(&identity) else {
-                return Ok(SubscriptionPushStatus::NotConnected);
-            };
+        // 订阅会话（受管客户端）与直连会话（无订阅凭据）都推送；任一入队即视为成功。
+        let mut pushed = SubscriptionPushStatus::NotConnected;
+        if let Some(entry) = self.subscription_sessions.get(&identity) {
             let targets = entry.targets(true);
-            if targets.is_empty() {
-                return Ok(SubscriptionPushStatus::Registering);
+            if !targets.is_empty() {
+                pushed = self.enqueue_subscription_config(record, &targets).await?;
             }
-            targets
+        }
+        if self.direct_sessions.contains_key(&identity) {
+            let direct = self.push_direct_config(record).await?;
+            if direct == SubscriptionPushStatus::Queued && pushed != SubscriptionPushStatus::Queued {
+                pushed = direct;
+            }
+        }
+        Ok(pushed)
+    }
+
+    /// 向在线的直连客户端（无订阅凭据）推送受管配置。直连客户端按身份
+    /// `(network_code, device_id)` 匹配即接受，因此信封使用空服务端证明。
+    pub async fn push_direct_config(
+        &self,
+        record: &db::ManagedConfigRecord,
+    ) -> anyhow::Result<SubscriptionPushStatus> {
+        use crate::protocol::ip_packet_protocol::{HEAD_LENGTH, MsgType, NetPacket};
+        let identity = (record.network_code.clone(), record.device_id.clone());
+        let Some(entry) = self.direct_sessions.get(&identity) else {
+            return Ok(SubscriptionPushStatus::NotConnected);
         };
-        self.enqueue_subscription_config(record, &sessions).await
+        let proof = SubscriptionServerProof {
+            server_nonce: Vec::new(),
+            server_proof: Vec::new(),
+            target_revision: record.revision as u64,
+        };
+        let envelope = self.subscription_envelope(record, proof)?;
+        let bytes = {
+            let payload = envelope.encode();
+            let mut bytes = BytesMut::zeroed(HEAD_LENGTH + payload.len());
+            let mut packet = NetPacket::new(&mut bytes)?;
+            packet.set_msg_type(MsgType::SubscriptionConfigPush);
+            packet.set_gateway_flag(true);
+            packet.set_ttl(1);
+            packet.set_payload(&payload)?;
+            bytes.freeze()
+        };
+        Ok(Self::enqueue_subscription_payloads(
+            vec![(entry.sender.clone(), bytes)],
+            SUBSCRIPTION_PUSH_TIMEOUT,
+        )
+        .await)
+    }
+
+    /// 记录一条无订阅凭据的直连连接，用于 Web 修改高级配置后向其热推送。
+    pub fn upsert_direct_session(
+        &self,
+        network_code: &str,
+        device_id: &str,
+        ip: Ipv4Addr,
+        sender: Sender<Bytes>,
+    ) {
+        self.direct_sessions.insert(
+            (network_code.to_string(), device_id.to_string()),
+            DirectSessionEntry {
+                network_code: network_code.to_string(),
+                device_id: device_id.to_string(),
+                ip,
+                sender,
+                control_connection: false,
+                applied_revision: 0,
+            },
+        );
+    }
+
+    /// 移除已断开的直连连接记录。
+    pub fn remove_direct_session(&self, network_code: &str, device_id: &str) {
+        self.direct_sessions
+            .remove(&(network_code.to_string(), device_id.to_string()));
     }
 
     async fn enqueue_subscription_config(
