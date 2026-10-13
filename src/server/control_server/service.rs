@@ -1120,6 +1120,28 @@ impl ControlService {
             .remove(&(network_code.to_string(), device_id.to_string()));
     }
 
+    /// 直连客户端（无订阅凭据）上线/重连时补发其受管配置。客户端重启后会
+    /// 重新注册连接，这里在登记直连会话后立即下发，无需 Web 重新编辑即可
+    /// 在启动时拉取并应用最新配置。
+    pub async fn push_managed_config_on_direct_connect(
+        &self,
+        network_code: &str,
+        device_id: &str,
+    ) -> anyhow::Result<()> {
+        if !self
+            .direct_sessions
+            .contains_key(&(network_code.to_string(), device_id.to_string()))
+        {
+            return Ok(());
+        }
+        if let Some(record) = db::get_managed_config(network_code, device_id).await? {
+            if let Err(error) = self.push_direct_config(&record).await {
+                log::warn!("设备 {network_code}/{device_id} 直连注册后的受管配置补发失败: {error:#}");
+            }
+        }
+        Ok(())
+    }
+
     async fn enqueue_subscription_config(
         &self,
         record: &db::ManagedConfigRecord,

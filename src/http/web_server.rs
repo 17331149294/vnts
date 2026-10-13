@@ -1,8 +1,9 @@
 use crate::ControlService;
 use crate::managed_config::{
-    ManagedClientConfigForm, canonicalize_client_config, canonicalize_stored_client_config,
-    editable_client_config, issue_subscription, managed_config_semantically_equal, new_join_id,
-    resolve_cert_mode, validate_managed_advanced_config,
+    ManagedClientConfigForm, apply_vnt_default_route_and_dns, canonicalize_client_config,
+    canonicalize_stored_client_config, editable_client_config, issue_subscription,
+    managed_config_semantically_equal, new_join_id, resolve_cert_mode,
+    validate_managed_advanced_config,
 };
 use crate::server::control_server::db::{
     self, ClientType, DeviceIpType, Ikev2InputRoute, ManagedConfigRecord, NetworkType,
@@ -1198,6 +1199,7 @@ fn new_draft_record(
     );
     let resolved = "finger".to_string();
     let config_toml = canonicalize_client_config("", &access, &resolved, device_name, is_fixed_ip)?;
+    let config_toml = apply_vnt_default_route_and_dns(&config_toml)?;
     let issued = if access.effective_subscription_server().is_empty() {
         None
     } else {

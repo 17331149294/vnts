@@ -151,6 +151,15 @@ impl ControlHandler {
                 session.ip,
                 sender.clone(),
             );
+            // 若服务端已为该直连设备建立受管配置，注册时立即补发，使客户端
+            // 重启后无需 Web 重新编辑即可在启动时拉取并应用最新配置。
+            if let Err(error) = self
+                .control_service
+                .push_managed_config_on_direct_connect(&session.network_code, &session.device_id)
+                .await
+            {
+                log::warn!("设备 {}/{} 直连注册后的受管配置补发失败: {error:#}", session.network_code, session.device_id);
+            }
         }
         Ok(())
     }

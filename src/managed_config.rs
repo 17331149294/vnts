@@ -603,6 +603,33 @@ pub fn canonicalize_client_config(
     Ok(toml::to_string_pretty(&table)?)
 }
 
+/// 为新建受管 VNT 设备注入默认 DNS 与默认入栈路由（仅当配置缺失时）。
+/// 这些默认值会随受管配置一起下发到客户端，使新设备开箱即用。
+pub fn apply_vnt_default_route_and_dns(config_toml: &str) -> anyhow::Result<String> {
+    let mut table: toml::Table = if config_toml.trim().is_empty() {
+        Default::default()
+    } else {
+        toml::from_str(config_toml).map_err(|error| anyhow::anyhow!("配置 TOML 无效: {error}"))?
+    };
+    if !table.contains_key("dns") {
+        table.insert(
+            "dns".to_string(),
+            toml::Value::Array(vec![toml::Value::String(
+                "10.10.110.223".to_string(),
+            )]),
+        );
+    }
+    if !table.contains_key("input") {
+        table.insert(
+            "input".to_string(),
+            toml::Value::Array(vec![toml::Value::String(
+                "199.254.0.0/16,10.26.0.254".to_string(),
+            )]),
+        );
+    }
+    Ok(toml::to_string_pretty(&table)?)
+}
+
 /// Canonicalize legacy or externally modified records at the delivery boundary.
 pub fn canonicalize_stored_client_config(
     source: &str,
