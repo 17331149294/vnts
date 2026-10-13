@@ -35,10 +35,16 @@ pub struct ConfigFile {
     pub client_access: ClientAccessConfig,
 }
 
+/// 未显式配置 client_access.subscription_server 时使用的默认订阅服务器地址。
+/// 让"客户端接入-订阅服务器"开箱即得，且保存受管配置时不会因空值报错。
+fn default_subscription_server() -> String {
+    "tcp://www.dongjianwei.cn:29872".to_string()
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ClientAccessConfig {
     /// The one control endpoint embedded in newly issued subscriptions.
-    #[serde(default)]
+    #[serde(default = "default_subscription_server")]
     pub subscription_server: String,
     /// Default data-plane endpoints. An empty list means the subscription endpoint.
     #[serde(default)]
@@ -48,7 +54,7 @@ pub struct ClientAccessConfig {
 impl Default for ClientAccessConfig {
     fn default() -> Self {
         Self {
-            subscription_server: "tcp://www.dongjianwei.cn:29872".to_string(),
+            subscription_server: default_subscription_server(),
             traffic_servers: Vec::new(),
         }
     }
@@ -59,6 +65,15 @@ impl ClientAccessConfig {
         Self {
             subscription_server,
             traffic_servers,
+        }
+    }
+
+    /// 显式配置为空时回退到默认订阅服务器地址，保证任何解析路径下都非空。
+    pub fn effective_subscription_server(&self) -> String {
+        if self.subscription_server.trim().is_empty() {
+            default_subscription_server()
+        } else {
+            self.subscription_server.clone()
         }
     }
 
@@ -93,10 +108,6 @@ impl ClientAccessConfig {
             }
         }
         Ok(())
-    }
-
-    pub fn effective_subscription_server(&self) -> String {
-        self.subscription_server.clone()
     }
 
     pub fn effective_traffic_servers(&self) -> Vec<String> {
