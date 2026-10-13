@@ -618,6 +618,16 @@ pub fn apply_vnt_default_route_and_dns(config_toml: &str) -> anyhow::Result<Stri
                 "10.10.110.223".to_string(),
             )]),
         );
+    } else {
+        // 客户端按字符串数组解析 dns（parse_envelope_string_list 只接受数组）；
+        // 把单值写法 `dns = "1.1.1.1"` 规范化为数组，避免下发后客户端解析为空。
+        let normalized = match table.get("dns") {
+            Some(toml::Value::String(value)) => vec![toml::Value::String(value.clone())],
+            Some(toml::Value::Array(values)) => values.clone(),
+            Some(_) => vec![],
+            None => vec![],
+        };
+        table.insert("dns".to_string(), toml::Value::Array(normalized));
     }
     if !table.contains_key("input") {
         table.insert(
@@ -701,13 +711,17 @@ pub fn canonicalize_stored_client_config(
         advanced.remove(field);
     }
     validate_managed_advanced_config(&toml::to_string(&advanced)?)?;
-    canonicalize_client_config(
+    let canonical = canonicalize_client_config(
         &toml::to_string(&advanced)?,
         &access,
         &cert_mode,
         device_name,
         is_fixed_ip,
-    )
+    )?;
+    // 交付边界统一注入默认 DNS 与默认入栈路由：无论设备是新建设备还是
+    // 存量设备、订阅还是直连，只要配置里未显式写 dns/input 就默认带上
+    // dns=10.10.110.223 与 input=["199.254.0.0/16,10.26.0.254"]。
+    Ok(apply_vnt_default_route_and_dns(&canonical)?)
 }
 
 /// Compares the effective server-managed payload while ignoring fields that
