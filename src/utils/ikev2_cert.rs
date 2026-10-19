@@ -197,9 +197,7 @@ pub fn certificate_matches_remote_id(cert_der: &[u8], remote_id: &str) -> anyhow
             .context("无法解析 IKEv2 证书 SAN")?;
         for name in san.0 {
             match (parsed_ip, name) {
-                (None, GeneralName::DnsName(dns))
-                    if dns.as_str().eq_ignore_ascii_case(remote_id) =>
-                {
+                (None, GeneralName::DnsName(dns)) if dns_name_matches(dns.as_str(), remote_id) => {
                     return Ok(true);
                 }
                 (Some(expected), GeneralName::IpAddress(bytes))
@@ -212,6 +210,26 @@ pub fn certificate_matches_remote_id(cert_der: &[u8], remote_id: &str) -> anyhow
         }
     }
     Ok(false)
+}
+
+/// DNS 名称匹配：精确相等；或 SAN 为 `*.example.com` 形式时匹配其一级子域
+/// （`vpn.example.com` 匹配；裸域 `example.com` 与多级 `a.b.example.com` 不匹配）。
+fn dns_name_matches(san: &str, remote_id: &str) -> bool {
+    if san.eq_ignore_ascii_case(remote_id) {
+        return true;
+    }
+    let Some(suffix) = san.strip_prefix("*.") else {
+        return false;
+    };
+    let mut parts = remote_id.splitn(2, '.');
+    let (first, rest) = match (parts.next(), parts.next()) {
+        (first, Some(rest)) => (first, rest),
+        _ => return false,
+    };
+    match first {
+        Some(first) => !first.is_empty() && rest.eq_ignore_ascii_case(suffix),
+        None => false,
+    }
 }
 
 fn ip_bytes(address: IpAddr) -> Vec<u8> {

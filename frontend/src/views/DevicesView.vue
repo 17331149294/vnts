@@ -86,6 +86,13 @@ const vntAdvancedToml = ref('')
 const vntAdvancedError = ref('')
 const vntSubscriptionServer = ref('')
 
+// IKEv2 / WireGuard 新建设备时预填的默认入口路由：
+// 把 199.254.0.0/16 与 10.10.110.233/32 的流量交给网关 10.26.0.254。
+const DEFAULT_INPUT_ROUTES: Ikev2InputRoute[] = [
+  { subnet: '199.254.0.0/16', target_ip: '10.26.0.254' },
+  { subnet: '10.10.110.233/32', target_ip: '10.26.0.254' },
+]
+
 const deviceForm = ref({
   device_id: '',
   device_name: '',
@@ -190,9 +197,15 @@ function changeClientType() {
     generatePassword()
   } else {
     deviceForm.value.ikev2_password = ''
+    showIkev2Password.value = false
+  }
+  // IKEv2 / WireGuard 预填默认入口路由；VNT 不使用入口路由。
+  if (deviceForm.value.client_type === 'IKEV2' || deviceForm.value.client_type === 'WIREGUARD') {
+    deviceForm.value.output_subnets = []
+    deviceForm.value.input_routes = DEFAULT_INPUT_ROUTES.map((route) => ({ ...route }))
+  } else {
     deviceForm.value.output_subnets = []
     deviceForm.value.input_routes = []
-    showIkev2Password.value = false
   }
 }
 

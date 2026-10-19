@@ -6,7 +6,8 @@ use bytes::Bytes;
 use ipnet::Ipv4Net;
 use pnet_packet::ipv4::Ipv4Packet;
 use rand::RngCore;
-use rsa::pkcs8::DecodePrivateKey;
+use rsa::pkcs1::DecodeRsaPrivateKey;
+use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey};
 use ryke::{
     AssignedConfig, ChildSa, CompletedSaInit, ConfigAttr, Configuration, CookiePolicy, EapEvent,
     EapResponder, Entropy, ExchangeType, Identification, IkeHeader, LocalSecret, MessageBuilder,
@@ -1508,8 +1509,15 @@ fn load_certificate(config: &Ikev2Config) -> anyhow::Result<Option<CertificateMa
         SigningMaterial::EcdsaP256(der)
     } else if rsa::RsaPrivateKey::from_pkcs8_der(&der).is_ok() {
         SigningMaterial::Rsa(der)
+    } else if let Ok(key) = rsa::RsaPrivateKey::from_pkcs1_der(&der) {
+        // PKCS#1（BEGIN RSA PRIVATE KEY）：转成 PKCS#8 DER 后再存储，
+        // 因为 signing_key() 内部还会做一次 from_pkcs8_der，直接存 PKCS#1 DER 会失败。
+        let pkcs8 = key
+            .to_pkcs8_der()
+            .context("无法将 PKCS#1 RSA 私钥转换为 PKCS#8")?;
+        SigningMaterial::Rsa(pkcs8.as_bytes().to_vec())
     } else {
-        bail!("IKEv2 private key must be RSA or ECDSA P-256 PKCS#8 PEM");
+        bail!("IKEv2 private key must be RSA (PKCS#8 or PKCS#1) or ECDSA P-256 PKCS#8 PEM");
     };
     let signing_key = signing.signing_key()?;
     let probe = b"vnts-ikev2-certificate-key-check";
